@@ -78,44 +78,28 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="24dp"
-                android:text="选择播放源（测速中...）"
+                android:text="选择播放源"
                 android:textColor="@color/text_primary"
                 android:textSize="16sp" />
 
             <TextView
-                android:id="@+id/sources_hd_label"
+                android:id="@+id/sources_loading_text"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="高清"
+                android:layout_marginTop="8dp"
+                android:text="资源获取中"
                 android:textColor="@color/text_secondary"
-                android:textSize="13sp"
-                android:visibility="gone" />
+                android:textSize="14sp" />
 
             <!-- Wraps to multiple rows instead of scrolling off-screen horizontally: source
                  badges have variable widths, so this uses a flow layout rather than a
                  fixed-column grid (see item_episode.xml's grid for the fixed-width case). -->
             <com.orion.tv.ui.common.FlowLayout
-                android:id="@+id/sources_grid_hd"
+                android:id="@+id/sources_grid"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" />
-
-            <TextView
-                android:id="@+id/sources_sd_label"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="一般"
-                android:textColor="@color/text_secondary"
-                android:textSize="13sp"
+                android:layout_marginTop="8dp"
                 android:visibility="gone" />
-
-            <com.orion.tv.ui.common.FlowLayout
-                android:id="@+id/sources_grid_sd"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp" />
 
             <TextView
                 android:id="@+id/episodes_label"
