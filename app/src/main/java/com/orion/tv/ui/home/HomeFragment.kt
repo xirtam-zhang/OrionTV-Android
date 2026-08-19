@@ -52,12 +52,34 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
     private var hasMorePages = true
     private var isLoadingMore = false
 
+    /**
+     * Back from a poster in the content grid returns focus to the tab bar instead of exiting the
+     * app outright — only a second Back press, with focus already outside the grid, actually exits.
+     */
     private val cancelLoadOnBack = object : OnBackPressedCallback(true) {
         override fun handleOnBackPressed() {
+            val focused = requireActivity().currentFocus
+            if (focused != null && isDescendantOf(focused, contentGrid)) {
+                focusSelectedTab()
+                return
+            }
             loadJob?.cancel()
             isEnabled = false
             requireActivity().onBackPressedDispatcher.onBackPressed()
         }
+    }
+
+    private fun isDescendantOf(view: View, ancestor: View): Boolean {
+        var current: View? = view
+        while (current != null) {
+            if (current === ancestor) return true
+            current = current.parent as? View
+        }
+        return false
+    }
+
+    private fun focusSelectedTab() {
+        (tabViews.firstOrNull { it.isSelected } ?: tabViews.firstOrNull())?.requestFocus()
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {

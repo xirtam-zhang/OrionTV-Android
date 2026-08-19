@@ -40,7 +40,11 @@ class DetailActivity : FragmentActivity(R.layout.activity_detail) {
     private lateinit var favoriteButton: TextView
     private lateinit var sourcesLabel: TextView
     private lateinit var sourcesLoadingText: TextView
-    private lateinit var sourcesGrid: FlowLayout
+    private lateinit var sourcesHdLabel: TextView
+    private lateinit var sourcesSdLabel: TextView
+    private lateinit var sourcesGridHd: FlowLayout
+    private lateinit var sourcesGridSd: FlowLayout
+    private lateinit var episodesLabel: TextView
     private lateinit var episodesGrid: GridLayout
     private lateinit var progressBar: ProgressBar
 
@@ -71,13 +75,19 @@ class DetailActivity : FragmentActivity(R.layout.activity_detail) {
         favoriteButton = findViewById(R.id.favorite_button)
         sourcesLabel = findViewById(R.id.sources_label)
         sourcesLoadingText = findViewById(R.id.sources_loading_text)
-        sourcesGrid = findViewById(R.id.sources_grid)
+        sourcesHdLabel = findViewById(R.id.sources_hd_label)
+        sourcesSdLabel = findViewById(R.id.sources_sd_label)
+        sourcesGridHd = findViewById(R.id.sources_grid_hd)
+        sourcesGridSd = findViewById(R.id.sources_grid_sd)
+        episodesLabel = findViewById(R.id.episodes_label)
         episodesGrid = findViewById(R.id.episodes_grid)
         progressBar = findViewById(R.id.detail_progress)
 
         val spacingPx = (12 * resources.displayMetrics.density).toInt()
-        sourcesGrid.horizontalSpacing = spacingPx
-        sourcesGrid.verticalSpacing = spacingPx
+        for (grid in listOf(sourcesGridHd, sourcesGridSd)) {
+            grid.horizontalSpacing = spacingPx
+            grid.verticalSpacing = spacingPx
+        }
         episodesGrid.columnCount = GridUtils.computeColumns(this)
         favoriteButton.setOnClickListener { toggleFavorite() }
 
@@ -135,30 +145,41 @@ class DetailActivity : FragmentActivity(R.layout.activity_detail) {
         }
     }
 
-    /** Nothing is shown until every source has a probe result, then the list renders sorted fastest-first. */
+    /** Nothing is shown until every source has a probe result, then the list splits into 高清/一般, each sorted fastest-first. */
     private fun refreshSources() {
-        sourcesGrid.removeAllViews()
+        sourcesGridHd.removeAllViews()
+        sourcesGridSd.removeAllViews()
         val probed = sources.isNotEmpty() && sources.all { probeResults.containsKey(it.source) }
         if (!probed) {
             sourcesLoadingText.visibility = View.VISIBLE
-            sourcesGrid.visibility = View.GONE
+            sourcesHdLabel.visibility = View.GONE
+            sourcesSdLabel.visibility = View.GONE
+            sourcesGridHd.visibility = View.GONE
+            sourcesGridSd.visibility = View.GONE
             return
         }
         sourcesLoadingText.visibility = View.GONE
-        sourcesGrid.visibility = View.VISIBLE
-        val sorted = sources.sortedBy { probeResults[it.source]?.latencyMs ?: Long.MAX_VALUE }
-        populateSourceBadges(sorted)
+        val byLatency = compareBy<SearchResult> { probeResults[it.source]?.latencyMs ?: Long.MAX_VALUE }
+        val hdSources = sources.filter { (probeResults[it.source]?.resolutionHeight ?: 0) >= HD_MIN_HEIGHT }.sortedWith(byLatency)
+        val sdSources = sources.filter { (probeResults[it.source]?.resolutionHeight ?: 0) < HD_MIN_HEIGHT }.sortedWith(byLatency)
+        sourcesHdLabel.visibility = if (hdSources.isNotEmpty()) View.VISIBLE else View.GONE
+        sourcesSdLabel.visibility = if (sdSources.isNotEmpty()) View.VISIBLE else View.GONE
+        sourcesGridHd.visibility = if (hdSources.isNotEmpty()) View.VISIBLE else View.GONE
+        sourcesGridSd.visibility = if (sdSources.isNotEmpty()) View.VISIBLE else View.GONE
+        sourcesSdLabel.text = if (hdSources.isEmpty()) "全部片源" else "一般"
+        populateSourceBadges(sourcesGridHd, hdSources)
+        populateSourceBadges(sourcesGridSd, sdSources)
     }
 
-    private fun populateSourceBadges(list: List<SearchResult>) {
+    private fun populateSourceBadges(grid: FlowLayout, list: List<SearchResult>) {
         list.forEach { result ->
-            val badge = layoutInflater.inflate(R.layout.item_source_badge, sourcesGrid, false) as TextView
+            val badge = layoutInflater.inflate(R.layout.item_source_badge, grid, false) as TextView
             val probe = probeResults[result.source]
             val pingLabel = if (probe?.latencyMs != null) " · ${probe.latencyMs}ms" else " · 超时"
             badge.text = "${result.source_name} (${result.episodes.size})$pingLabel"
             badge.isSelected = result.source == selected?.source
-            badge.setOnClickListener { selectSource(result, focusFirstEpisode = true) }
-            sourcesGrid.addView(badge)
+            badge.setOnClickListener { selectSource(result, showEpisodes = true) }
+            grid.addView(badge)
         }
     }
 
@@ -189,7 +210,12 @@ class DetailActivity : FragmentActivity(R.layout.activity_detail) {
         }
     }
 
-    private fun selectSource(result: SearchResult, focusFirstEpisode: Boolean = false) {
+    /**
+     * [showEpisodes] is only true for an explicit badge tap: the episode grid stays hidden through
+     * every automatic pre-probe selection (used just to get poster/desc on screen instantly) and
+     * only appears once the user has actually chosen a source from the speed-tested list.
+     */
+    private fun selectSource(result: SearchResult, showEpisodes: Boolean = false) {
         selected = result
         refreshSources()
         metaText.text = listOfNotNull(
@@ -198,8 +224,10 @@ class DetailActivity : FragmentActivity(R.layout.activity_detail) {
             result.source_name
         ).joinToString(" · ")
         descText.text = result.desc.orEmpty()
-        populateEpisodesGrid(result.episodes.size)
-        if (focusFirstEpisode) {
+        if (showEpisodes) {
+            populateEpisodesGrid(result.episodes.size)
+            episodesLabel.visibility = View.VISIBLE
+            episodesGrid.visibility = View.VISIBLE
             episodesGrid.getChildAt(0)?.requestFocus()
         }
         Glide.with(this)
@@ -263,6 +291,8 @@ class DetailActivity : FragmentActivity(R.layout.activity_detail) {
     }
 
     companion object {
+        private const val HD_MIN_HEIGHT = 720
+
         const val EXTRA_TITLE = "title"
         const val EXTRA_SEARCH_TITLE = "search_title"
         const val EXTRA_SOURCE = "source"

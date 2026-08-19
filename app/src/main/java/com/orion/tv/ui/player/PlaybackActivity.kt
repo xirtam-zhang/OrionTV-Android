@@ -34,7 +34,7 @@ import kotlinx.coroutines.launch
 /**
  * Custom-controls VOD player (mirrors OrionTV's play.tsx + PlayerControls + useTVRemoteHandler):
  * D-pad left/right seeks +/-20s, center toggles play/pause, Back collapses panels before exiting,
- * controls auto-hide after 5s, progress is resumed/saved against /api/playrecords, and manual
+ * controls auto-hide after 1s, progress is resumed/saved against /api/playrecords, and manual
  * intro/outro markers auto-skip/auto-advance on replay. HLS playlists are fetched through
  * AdSegmentFilterInterceptor so spliced-in ad segments never reach the player.
  */
@@ -440,10 +440,19 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
         resetHideControlsTimer()
     }
 
+    /** Shown by an active seek: reveals the progress bar without stealing focus off the root, so held left/right keeps being read as seeking rather than button navigation. */
+    private fun showControlsForSeek() {
+        controlsOverlay.visibility = View.VISIBLE
+        resetHideControlsTimer()
+    }
+
     private fun hideControls() {
         controlsOverlay.visibility = View.GONE
         handler.removeCallbacks(hideControlsRunnable)
     }
+
+    /** Left/right should keep seeking (not navigate the button row) as long as focus never actually landed on a control button — regardless of whether the overlay is visible. */
+    private fun isControlsFocused(): Boolean = controlsOverlay.findFocus() != null
 
     private fun resetHideControlsTimer() {
         handler.removeCallbacks(hideControlsRunnable)
@@ -489,7 +498,7 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
         if (episodesPanel.visibility == View.VISIBLE || sourcesPanel.visibility == View.VISIBLE) {
             return super.dispatchKeyEvent(event)
         }
-        if (event.action == KeyEvent.ACTION_DOWN && controlsOverlay.visibility != View.VISIBLE) {
+        if (event.action == KeyEvent.ACTION_DOWN && !isControlsFocused()) {
             when (event.keyCode) {
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                     showControls()
@@ -503,11 +512,13 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
                 KeyEvent.KEYCODE_DPAD_LEFT -> {
                     if (event.repeatCount == 0) leftPressStartAt = System.currentTimeMillis()
                     seekBy(-accelSeekStepMs(leftPressStartAt ?: System.currentTimeMillis()))
+                    showControlsForSeek()
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_RIGHT -> {
                     if (event.repeatCount == 0) rightPressStartAt = System.currentTimeMillis()
                     seekBy(accelSeekStepMs(rightPressStartAt ?: System.currentTimeMillis()))
+                    showControlsForSeek()
                     return true
                 }
             }
@@ -579,7 +590,7 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
             3_000L to 40_000L,
             6_000L to 60_000L
         )
-        private const val CONTROLS_TIMEOUT_MS = 5_000L
+        private const val CONTROLS_TIMEOUT_MS = 1_000L
         private const val LOAD_TIMEOUT_MS = 60_000L
         private val SPEED_OPTIONS = floatArrayOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
         private val DPAD_KEYS = setOf(
