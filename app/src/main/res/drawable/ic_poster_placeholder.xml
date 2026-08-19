@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="220dp"
+    android:height="310dp"
+    android:viewportWidth="220"
+    android:viewportHeight="310">
+    <path
+        android:pathData="M0,0h220v310h-220z"
+        android:fillColor="#1C1C1C" />
+    <!-- generic "image" glyph: a rounded frame + a small mountain/circle icon, centered -->
+    <path
+        android:pathData="M60,120 h100 a10,10 0,0 1,10 10 v50 a10,10 0,0 1,-10 10 h-100 a10,10 0,0 1,-10 -10 v-50 a10,10 0,0 1,10 -10 z"
+        android:strokeColor="#3A3A3A"
+        android:strokeWidth="4"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M70,175 l25,-25 l20,20 l15,-15 l30,30 z"
+        android:fillColor="#3A3A3A" />
+    <path
+        android:pathData="M138,138 m-8,0 a8,8 0,1 1,16 0 a8,8 0,1 1,-16 0"
+        android:fillColor="#3A3A3A" />
+</vector>
