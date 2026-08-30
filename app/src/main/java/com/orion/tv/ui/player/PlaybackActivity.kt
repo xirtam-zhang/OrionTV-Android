@@ -25,6 +25,7 @@ import com.orion.tv.ServiceLocator
 import com.orion.tv.data.remote.dto.PlayRecord
 import com.orion.tv.data.remote.dto.SearchResult
 import com.orion.tv.player.AdSegmentFilterInterceptor
+import com.orion.tv.player.OrionRenderersFactory
 import com.orion.tv.player.PlaybackProgressTracker
 import com.orion.tv.ui.detail.EpisodeAdapter
 import com.orion.tv.ui.detail.SourceAdapter
@@ -201,7 +202,13 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
             .addInterceptor(AdSegmentFilterInterceptor { ServiceLocator.settingsStore.adFilterEnabled })
             .build()
         val dataSourceFactory = OkHttpDataSource.Factory(playerOkHttpClient)
-        val exoPlayer = ExoPlayer.Builder(this)
+        // Route audio through a dialogue-forward 5.1->stereo downmix + loudness normaliser so
+        // cinema-mastered sources don't play back as booming bass over near-inaudible speech.
+        val renderersFactory = OrionRenderersFactory(
+            this,
+            ServiceLocator.settingsStore.audioNormalizationEnabled,
+        )
+        val exoPlayer = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build()
         exoPlayer.addListener(playerListener)

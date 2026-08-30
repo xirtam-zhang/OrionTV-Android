@@ -24,6 +24,7 @@ class SettingsActivity : FragmentActivity(R.layout.activity_settings) {
     private lateinit var serverUrlInput: EditText
     private lateinit var m3uUrlInput: EditText
     private lateinit var adFilterSwitch: Switch
+    private lateinit var audioNormalizationSwitch: Switch
     private lateinit var progressBar: ProgressBar
 
     private var pendingJob: Job? = null
@@ -42,6 +43,7 @@ class SettingsActivity : FragmentActivity(R.layout.activity_settings) {
         serverUrlInput = findViewById(R.id.server_url_input)
         m3uUrlInput = findViewById(R.id.m3u_url_input)
         adFilterSwitch = findViewById(R.id.ad_filter_switch)
+        audioNormalizationSwitch = findViewById(R.id.audio_normalization_switch)
         progressBar = findViewById(R.id.settings_progress)
         val serverUrlSaveButton = findViewById<TextView>(R.id.server_url_save_button)
         val m3uUrlSaveButton = findViewById<TextView>(R.id.m3u_url_save_button)
@@ -50,9 +52,14 @@ class SettingsActivity : FragmentActivity(R.layout.activity_settings) {
         serverUrlInput.setText(ServiceLocator.settingsStore.serverBaseUrl.orEmpty())
         m3uUrlInput.setText(ServiceLocator.settingsStore.m3uUrl.orEmpty())
         adFilterSwitch.isChecked = ServiceLocator.settingsStore.adFilterEnabled
+        audioNormalizationSwitch.isChecked = ServiceLocator.settingsStore.audioNormalizationEnabled
 
         adFilterSwitch.setOnCheckedChangeListener { _, isChecked ->
             ServiceLocator.settingsStore.adFilterEnabled = isChecked
+        }
+        audioNormalizationSwitch.setOnCheckedChangeListener { _, isChecked ->
+            ServiceLocator.settingsStore.audioNormalizationEnabled = isChecked
+            Toast.makeText(this, "重新进入播放页后生效", Toast.LENGTH_SHORT).show()
         }
         serverUrlSaveButton.setOnClickListener { saveServerUrl() }
         m3uUrlSaveButton.setOnClickListener { saveM3uUrl() }

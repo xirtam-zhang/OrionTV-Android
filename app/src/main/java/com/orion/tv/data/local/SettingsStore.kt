@@ -25,6 +25,11 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean(KEY_AD_FILTER_ENABLED, true)
         set(value) = prefs.edit().putBoolean(KEY_AD_FILTER_ENABLED, value).apply()
 
+    /** Dialogue-forward 5.1->stereo downmix + loudness normalisation in the player. */
+    var audioNormalizationEnabled: Boolean
+        get() = prefs.getBoolean(KEY_AUDIO_NORMALIZATION, true)
+        set(value) = prefs.edit().putBoolean(KEY_AUDIO_NORMALIZATION, value).apply()
+
     fun isSourceEnabled(sourceKey: String): Boolean =
         prefs.getBoolean(KEY_SOURCE_PREFIX + sourceKey, true)
 
@@ -42,6 +47,7 @@ class SettingsStore(context: Context) {
         private const val KEY_SERVER_BASE_URL = "server_base_url"
         private const val KEY_M3U_URL = "m3u_url"
         private const val KEY_AD_FILTER_ENABLED = "ad_filter_enabled"
+        private const val KEY_AUDIO_NORMALIZATION = "audio_normalization_enabled"
         private const val KEY_SOURCE_PREFIX = "source_enabled_"
     }
 }
