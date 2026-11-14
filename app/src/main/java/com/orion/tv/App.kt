@@ -7,6 +7,7 @@ import com.bumptech.glide.integration.okhttp3.OkHttpUrlLoader
 import com.bumptech.glide.load.engine.cache.InternalCacheDiskCacheFactory
 import com.bumptech.glide.load.model.GlideUrl
 import com.orion.tv.log.FileLogger
+import com.orion.tv.player.PlayerCache
 import java.io.InputStream
 
 class App : Application() {
@@ -15,6 +16,7 @@ class App : Application() {
         super.onCreate()
         FileLogger.init(this)
         FileLogger.d("App", "onCreate versionName=${BuildConfig.VERSION_NAME} debug=${BuildConfig.DEBUG}")
+        PlayerCache.cleanIfDue(this)
         ServiceLocator.init(this)
         initGlide()
     }

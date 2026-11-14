@@ -7,6 +7,7 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
@@ -14,12 +15,14 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.orion.tv.R
 import com.orion.tv.ServiceLocator
+import com.orion.tv.data.remote.dto.SearchResult
 import com.orion.tv.log.FileLogger
 import com.orion.tv.ui.common.CatalogItem
 import com.orion.tv.ui.common.GridSpacingItemDecoration
 import com.orion.tv.ui.common.PosterAdapter
 import com.orion.tv.ui.common.openDetail
 import com.orion.tv.ui.favorites.FavoritesActivity
+import com.orion.tv.ui.player.PlaybackActivity
 import com.orion.tv.ui.search.SearchActivity
 import com.orion.tv.ui.settings.SettingsActivity
 import com.orion.tv.util.GridUtils
@@ -47,6 +50,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
 
     private val tabViews = mutableListOf<TextView>()
     private var loadJob: Job? = null
+    private var playJob: Job? = null
     private var currentTab: HomeTab? = null
     private var nextPageStart = 0
     private var hasMorePages = true
@@ -97,7 +101,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
             startActivity(Intent(requireContext(), SettingsActivity::class.java))
         }
 
-        posterAdapter = PosterAdapter { requireContext().openDetail(it) }
+        posterAdapter = PosterAdapter { onPosterClicked(it) }
         contentGrid.apply {
             layoutManager = GridLayoutManager(requireContext(), GridUtils.computeColumns(requireContext(), itemWidthDp = 142, minColumns = 3, maxColumns = 10))
             adapter = posterAdapter
@@ -119,6 +123,61 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
 
         setupTabs()
         selectTab(DEFAULT_TAB_INDEX)
+    }
+
+    /** 最近播放 items resume the saved source directly; everything else goes to the detail page. */
+    private fun onPosterClicked(item: CatalogItem) {
+        if (currentTab?.isRecent != true || item.source == null || item.sourceId == null) {
+            requireContext().openDetail(item)
+            return
+        }
+        if (playJob?.isActive == true) return
+        playJob = lifecycleScope.launch {
+            progressBar.visibility = View.VISIBLE
+            try {
+                val match = resolveRecordSource(item)
+                if (match == null || match.episodes.isEmpty()) {
+                    Toast.makeText(requireContext(), "原片源已失效，请重新选择", Toast.LENGTH_SHORT).show()
+                    requireContext().openDetail(item)
+                    return@launch
+                }
+                val episodeIndex = ((item.recordIndex ?: 1) - 1).coerceIn(0, match.episodes.size - 1)
+                startActivity(Intent(requireContext(), PlaybackActivity::class.java).apply {
+                    putExtra(PlaybackActivity.EXTRA_SOURCE, match.source)
+                    putExtra(PlaybackActivity.EXTRA_SOURCE_ID, match.id)
+                    // The id-lookup (detail) API can return a blank title/poster/year; saved progress
+                    // is written back from these extras, so never let blanks overwrite the record.
+                    putExtra(PlaybackActivity.EXTRA_TITLE, item.title.ifBlank { match.title }.ifBlank { item.searchTitle.orEmpty() })
+                    putExtra(PlaybackActivity.EXTRA_SEARCH_TITLE, item.searchTitle ?: item.title)
+                    putExtra(PlaybackActivity.EXTRA_SOURCE_NAME, match.source_name)
+                    putExtra(PlaybackActivity.EXTRA_YEAR, item.year.orEmpty().ifBlank { match.year })
+                    putExtra(PlaybackActivity.EXTRA_POSTER, item.cover.orEmpty().ifBlank { match.poster })
+                    putExtra(PlaybackActivity.EXTRA_EPISODE_URLS, match.episodes.toTypedArray())
+                    putExtra(PlaybackActivity.EXTRA_EPISODE_INDEX, episodeIndex)
+                })
+            } finally {
+                progressBar.visibility = View.GONE
+            }
+        }
+    }
+
+    /**
+     * Finds the saved source's current episode list. Tries the exact id lookup first, then falls
+     * back like the detail page does: a same-source search (exact id, else its first hit), and
+     * finally the full multi-source search restricted to that source.
+     */
+    private suspend fun resolveRecordSource(item: CatalogItem): SearchResult? {
+        val source = item.source ?: return null
+        val id = item.sourceId ?: return null
+        val query = item.searchTitle ?: item.title
+        runCatching { catalogRepository.detail(id, source) }.getOrNull()
+            ?.takeIf { it.episodes.isNotEmpty() }?.let { return it }
+        val sameSource = catalogRepository.searchOne(query, source)
+        (sameSource.firstOrNull { it.id == id } ?: sameSource.firstOrNull())
+            ?.takeIf { it.episodes.isNotEmpty() }?.let { return it }
+        val all = runCatching { catalogRepository.search(query) }.getOrDefault(emptyList())
+        return all.firstOrNull { it.source == source && it.id == id && it.episodes.isNotEmpty() }
+            ?: all.firstOrNull { it.source == source && it.episodes.isNotEmpty() }
     }
 
     private fun openSearch(prefillQuery: String?) {
@@ -199,13 +258,18 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
                 val idx = key.indexOf('+')
                 if (idx <= 0) return@mapNotNull null
                 CatalogItem(
-                    title = record.title,
+                    // Records saved with a blank title by an earlier build: fall back to the search title.
+                    title = record.title.ifBlank { record.search_title.orEmpty() },
                     posterUrl = catalogRepository.imageProxyUrl(record.cover),
                     subtitle = "第${record.index}集",
                     source = key.substring(0, idx),
                     sourceId = key.substring(idx + 1),
                     searchTitle = record.search_title ?: record.title,
-                    progress = if (record.total_time > 0) record.play_time.toFloat() / record.total_time else null
+                    progress = if (record.total_time > 0) record.play_time.toFloat() / record.total_time else null,
+                    recordIndex = record.index,
+                    sourceName = record.source_name,
+                    year = record.year,
+                    cover = record.cover
                 )
             }
     }
@@ -227,6 +291,7 @@ class HomeFragment : Fragment(R.layout.fragment_home) {
 
     override fun onDestroyView() {
         loadJob?.cancel()
+        playJob?.cancel()
         super.onDestroyView()
     }
 

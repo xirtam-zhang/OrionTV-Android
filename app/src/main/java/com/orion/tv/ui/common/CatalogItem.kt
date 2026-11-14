@@ -14,5 +14,10 @@ data class CatalogItem(
     val source: String? = null,
     val sourceId: String? = null,
     val searchTitle: String? = null,
-    val progress: Float? = null
+    val progress: Float? = null,
+    // Set for 最近播放 items: what's needed to resume playback without going through the detail page.
+    val recordIndex: Int? = null,
+    val sourceName: String? = null,
+    val year: String? = null,
+    val cover: String? = null
 )

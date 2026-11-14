@@ -12,6 +12,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.orion.tv.R
 import com.orion.tv.ServiceLocator
+import com.orion.tv.data.remote.dto.SearchResult
 import com.orion.tv.ui.common.CatalogItem
 import com.orion.tv.ui.common.GridSpacingItemDecoration
 import com.orion.tv.ui.common.PosterAdapter
@@ -85,14 +86,16 @@ class SearchActivity : FragmentActivity(R.layout.activity_search) {
             progressBar.visibility = View.VISIBLE
             emptyText.visibility = View.GONE
             try {
-                val results = runCatching { ServiceLocator.catalogRepository.search(query) }.getOrDefault(emptyList())
-                val items = results.map { r ->
+                val results = rankByRelevance(
+                    runCatching { ServiceLocator.catalogRepository.search(query) }.getOrDefault(emptyList()),
+                    query
+                )
+                // One card per movie, not per source: the detail page lists the sources anyway.
+                val items = dedupeByMovie(results).map { r ->
                     CatalogItem(
                         title = r.title,
                         posterUrl = ServiceLocator.catalogRepository.imageProxyUrl(r.poster),
-                        subtitle = r.source_name,
-                        source = r.source,
-                        sourceId = r.id,
+                        subtitle = r.year.takeIf { it.isNotBlank() },
                         searchTitle = r.title
                     )
                 }
@@ -104,6 +107,44 @@ class SearchActivity : FragmentActivity(R.layout.activity_search) {
             }
         }
     }
+
+    /**
+     * Simple relevance ranking: exact title match first, then title starts with the query, then
+     * title contains it, then everything else; within a tier shorter titles (closer to the query)
+     * come first. The sort is stable, so the server's order is kept among equals.
+     */
+    private fun rankByRelevance(results: List<SearchResult>, query: String): List<SearchResult> {
+        val q = normalize(query)
+        if (q.isEmpty()) return results
+        fun tier(title: String): Int {
+            val t = normalize(title)
+            return when {
+                t == q -> 0
+                t.startsWith(q) -> 1
+                t.contains(q) -> 2
+                else -> 3
+            }
+        }
+        return results.sortedWith(compareBy<SearchResult>({ tier(it.title) }, { normalize(it.title).length }))
+    }
+
+    /**
+     * Collapses the same movie offered by several sources into one entry (input order, i.e. the
+     * relevance ranking, is kept). Same Douban id, or else same normalised title + year. The entry
+     * kept is the first one, preferring a copy that actually has a poster.
+     */
+    private fun dedupeByMovie(results: List<SearchResult>): List<SearchResult> {
+        val byKey = LinkedHashMap<String, SearchResult>()
+        for (r in results) {
+            val key = if (r.douban_id != null && r.douban_id > 0) "d${r.douban_id}" else "t${normalize(r.title)}|${r.year}"
+            val existing = byKey[key]
+            if (existing == null || (existing.poster.isBlank() && r.poster.isNotBlank())) byKey[key] = r
+        }
+        return byKey.values.toList()
+    }
+
+    private fun normalize(s: String): String =
+        s.lowercase().filter { it.isLetterOrDigit() }
 
     override fun onDestroy() {
         searchJob?.cancel()

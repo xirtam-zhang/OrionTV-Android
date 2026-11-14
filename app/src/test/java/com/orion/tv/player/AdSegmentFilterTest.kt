@@ -44,7 +44,7 @@ class AdSegmentFilterTest {
         assertTrue("main_a.ts should be kept", filtered.contains("main_a.ts"))
         assertTrue("main_b.ts (post-ad content) should be kept", filtered.contains("main_b.ts"))
         assertFalse("ad_1.ts should be dropped", filtered.contains("ad_1.ts"))
-        assertFalse("no discontinuity tags should remain", filtered.contains("#EXT-X-DISCONTINUITY"))
+        assertEquals("one discontinuity between the two kept blocks", 1, "#EXT-X-DISCONTINUITY".toRegex().findAll(filtered).count())
         assertTrue(filtered.contains("#EXT-X-ENDLIST"))
     }
 

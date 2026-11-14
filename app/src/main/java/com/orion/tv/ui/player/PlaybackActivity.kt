@@ -16,17 +16,24 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import com.orion.tv.R
 import com.orion.tv.ServiceLocator
 import com.orion.tv.data.remote.dto.PlayRecord
+import com.orion.tv.log.FileLogger
 import com.orion.tv.data.remote.dto.SearchResult
 import com.orion.tv.player.AdSegmentFilterInterceptor
 import com.orion.tv.player.OrionRenderersFactory
 import com.orion.tv.player.PlaybackProgressTracker
+import com.orion.tv.player.PlayerCache
+import com.orion.tv.player.SegmentPrefetcher
+import java.util.concurrent.TimeUnit
 import com.orion.tv.ui.detail.EpisodeAdapter
 import com.orion.tv.ui.detail.SourceAdapter
 import kotlinx.coroutines.Job
@@ -82,6 +89,14 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
     private var sourceSwitchJob: Job? = null
     private var isUserSeeking = false
 
+    // Stall recovery + background prefetch state (all touched on the main thread except prefetchGo).
+    private var bufferingSinceMs = 0L
+    private var lastStallKickMs = 0L
+    private var errorRetries = 0
+    private var prefetcher: SegmentPrefetcher? = null
+    private var prefetchStarted = false
+    @Volatile private var prefetchGo = false
+
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private val hideControlsRunnable = Runnable { hideControls() }
     private val loadTimeoutRunnable = Runnable {
@@ -104,6 +119,7 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
         setupControlListeners()
 
         titleText.text = "$title  第${currentEpisodeIndex + 1}集  ($sourceName)"
+        if (altSources.size <= 1) loadAltSources()
         loadJob = lifecycleScope.launch {
             val resumeMs = resolveResumePositionMs(currentEpisodeIndex)
             loadEpisode(currentEpisodeIndex, resumeMs)
@@ -198,10 +214,25 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
     }
 
     private fun setupPlayer() {
+        // Short timeouts: a segment request that connects but then hangs is the classic "stuck
+        // until I seek" stall; failing fast lets ExoPlayer retry it on a fresh connection instead
+        // of sitting on the shared client's 20s read timeout.
         val playerOkHttpClient = ServiceLocator.networkModule.okHttpClient.newBuilder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
             .addInterceptor(AdSegmentFilterInterceptor { ServiceLocator.settingsStore.adFilterEnabled })
             .build()
-        val dataSourceFactory = OkHttpDataSource.Factory(playerOkHttpClient)
+        val dataSourceFactory = CacheDataSource.Factory()
+            .setCache(PlayerCache.get(this))
+            .setUpstreamDataSourceFactory(OkHttpDataSource.Factory(playerOkHttpClient))
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        prefetcher = SegmentPrefetcher(playerOkHttpClient, dataSourceFactory) { prefetchGo }
+        // Keep a much deeper buffer than the default 50s while the network allows it.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(60_000, 240_000, 2_500, 5_000)
+            .setTargetBufferBytes(64 * 1024 * 1024)
+            .setPrioritizeTimeOverSizeThresholds(false)
+            .build()
         // Route audio through a dialogue-forward 5.1->stereo downmix + loudness normaliser so
         // cinema-mastered sources don't play back as booming bass over near-inaudible speech.
         val renderersFactory = OrionRenderersFactory(
@@ -209,6 +240,7 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
             ServiceLocator.settingsStore.audioNormalizationEnabled,
         )
         val exoPlayer = ExoPlayer.Builder(this, renderersFactory)
+            .setLoadControl(loadControl)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build()
         exoPlayer.addListener(playerListener)
@@ -240,11 +272,89 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
                 Player.STATE_READY -> {
                     loadingSpinner.visibility = View.GONE
                     handler.removeCallbacks(loadTimeoutRunnable)
+                    errorRetries = 0
                 }
                 Player.STATE_BUFFERING -> loadingSpinner.visibility = View.VISIBLE
                 Player.STATE_ENDED -> advanceToNextEpisodeIfAny()
                 else -> Unit
             }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            // Without this a failed segment load (after ExoPlayer's own retries) leaves the player
+            // dead on a frozen frame. Re-prepare at the same position a few times before giving up.
+            val exoPlayer = player ?: return
+            FileLogger.e("Playback", "player error (retry $errorRetries): ${error.errorCodeName}", error)
+            if (errorRetries++ < MAX_ERROR_RETRIES) {
+                val position = exoPlayer.currentPosition
+                exoPlayer.prepare()
+                exoPlayer.seekTo(position)
+                exoPlayer.playWhenReady = true
+            } else {
+                loadingSpinner.visibility = View.GONE
+                Toast.makeText(this@PlaybackActivity, "播放出错，请换个片源重试", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int
+        ) {
+            if (reason == Player.DISCONTINUITY_REASON_SEEK) restartPrefetch()
+        }
+    }
+
+    private fun restartPrefetch() {
+        prefetcher?.stop()
+        prefetchStarted = false
+        prefetchGo = false
+    }
+
+    /**
+     * Once per second: (1) if playback has been starved for 10s+, re-issue the load with a
+     * seek-to-current-position, which is what the seek-forward-then-back workaround achieved;
+     * (2) gate/start the background prefetch on how healthy the buffer is.
+     */
+    private fun watchBufferHealth(exoPlayer: ExoPlayer) {
+        val now = System.currentTimeMillis()
+        val buffering = exoPlayer.playbackState == Player.STATE_BUFFERING && exoPlayer.playWhenReady
+        if (!buffering) {
+            bufferingSinceMs = 0L
+        } else {
+            if (bufferingSinceMs == 0L) bufferingSinceMs = now
+            if (now - bufferingSinceMs > STALL_KICK_AFTER_MS && now - lastStallKickMs > STALL_KICK_AFTER_MS) {
+                lastStallKickMs = now
+                FileLogger.d("Playback", "stalled ${now - bufferingSinceMs}ms, re-issuing load at ${exoPlayer.currentPosition}")
+                exoPlayer.seekTo(exoPlayer.currentPosition)
+            }
+        }
+
+        if (exoPlayer.playbackState == Player.STATE_BUFFERING) {
+            prefetchGo = false
+        } else if (exoPlayer.playbackState == Player.STATE_READY &&
+            exoPlayer.bufferedPosition - exoPlayer.currentPosition >= PREFETCH_START_BUFFER_MS
+        ) {
+            prefetchGo = true
+            if (!prefetchStarted && currentEpisodeIndex in episodeUrls.indices) {
+                prefetchStarted = true
+                prefetcher?.start(
+                    lifecycleScope,
+                    episodeUrls[currentEpisodeIndex],
+                    exoPlayer.currentPosition,
+                    episodeUrls.getOrNull(currentEpisodeIndex + 1)
+                )
+            }
+        }
+    }
+
+    /** Fills the in-player source switcher when launched without the full source list (resume from 最近播放). */
+    private fun loadAltSources() {
+        lifecycleScope.launch {
+            val all = runCatching { ServiceLocator.catalogRepository.search(searchTitle) }.getOrDefault(emptyList())
+            if (all.isEmpty()) return@launch
+            altSources = all
+            sourceAdapter.submit(altSources, source)
         }
     }
 
@@ -252,6 +362,8 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
         val exoPlayer = player ?: return
         if (index !in episodeUrls.indices) return
         currentEpisodeIndex = index
+        restartPrefetch()
+        errorRetries = 0
         val mediaItem = MediaItem.Builder()
             .setUri(episodeUrls[index])
             .setMimeType(MimeTypes.APPLICATION_M3U8)
@@ -295,6 +407,7 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
     private fun tick() {
         val exoPlayer = player ?: return
         updateProgressUi(exoPlayer)
+        watchBufferHealth(exoPlayer)
         checkOutroAutoAdvance(exoPlayer)
         if (exoPlayer.isPlaying) saveProgress(force = false)
     }
@@ -573,6 +686,7 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
         loadJob?.cancel()
         sourceSwitchJob?.cancel()
         handler.removeCallbacksAndMessages(null)
+        prefetcher?.stop()
         player?.removeListener(playerListener)
         player?.release()
         player = null
@@ -599,6 +713,9 @@ class PlaybackActivity : FragmentActivity(R.layout.activity_player) {
         )
         private const val CONTROLS_TIMEOUT_MS = 1_000L
         private const val LOAD_TIMEOUT_MS = 60_000L
+        private const val STALL_KICK_AFTER_MS = 10_000L
+        private const val MAX_ERROR_RETRIES = 3
+        private const val PREFETCH_START_BUFFER_MS = 15_000L
         private val SPEED_OPTIONS = floatArrayOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
         private val DPAD_KEYS = setOf(
             KeyEvent.KEYCODE_DPAD_LEFT,

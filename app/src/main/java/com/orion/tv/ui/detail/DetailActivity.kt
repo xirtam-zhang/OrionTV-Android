@@ -25,6 +25,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /**
  * Multi-source detail screen. Mirrors OrionTV's detailStore.init(): if the caller already knows
@@ -50,6 +52,7 @@ class DetailActivity : FragmentActivity(R.layout.activity_detail) {
 
     private val sources = mutableListOf<SearchResult>()
     private val probeResults = mutableMapOf<String, ProbeResult>()
+    private val badges = mutableMapOf<String, TextView>()
     private var selected: SearchResult? = null
     private var isFavorite = false
     private var searchTitle: String = ""
@@ -131,55 +134,111 @@ class DetailActivity : FragmentActivity(R.layout.activity_detail) {
         probeSources()
     }
 
-    /** Latency-only speed test (see M3u8Prober) for every source, run once the full source list is in. */
+    /**
+     * Real speed test (see M3u8Prober) for every source, run once the full source list is in.
+     * Limited concurrency so parallel downloads don't skew each other's measured speed too much.
+     */
     private fun probeSources() {
         probeJob?.cancel()
         probeJob = lifecycleScope.launch {
+            val gate = Semaphore(PROBE_CONCURRENCY)
+            var done = 0
+            val total = sources.size
+            sourcesLoadingText.text = "正在测速… 0/$total"
             sources.map { result ->
                 async {
-                    val firstEpisodeUrl = result.episodes.firstOrNull().orEmpty()
-                    probeResults[result.source] = M3u8Prober.probe(firstEpisodeUrl)
+                    gate.withPermit {
+                        val firstEpisodeUrl = result.episodes.firstOrNull().orEmpty()
+                        probeResults[result.source] = M3u8Prober.probe(firstEpisodeUrl)
+                    }
+                    done++
+                    sourcesLoadingText.text = "正在测速… $done/$total"
+                    // Update just this badge in place, so the list never jumps while it is being used.
+                    badges[result.source]?.text = badgeText(result)
                 }
             }.awaitAll()
-            refreshSources()
+            refreshSources() // all done: re-sort fastest-first
         }
     }
 
-    /** Nothing is shown until every source has a probe result, then the list splits into 高清/一般, each sorted fastest-first. */
+    /**
+     * Shown as soon as the source list exists, each badge starting at 测速中…; results fill in per
+     * badge as they arrive, and the list is re-sorted by speed once every test has finished.
+     */
     private fun refreshSources() {
+        val focusedSource = badges.entries.firstOrNull { it.value.hasFocus() }?.key
         sourcesGridHd.removeAllViews()
         sourcesGridSd.removeAllViews()
-        val probed = sources.isNotEmpty() && sources.all { probeResults.containsKey(it.source) }
-        if (!probed) {
+        badges.clear()
+        sourcesGridSd.visibility = View.GONE
+        sourcesSdLabel.visibility = View.GONE
+        if (sources.isEmpty()) {
+            sourcesLoadingText.text = "正在获取片源…"
             sourcesLoadingText.visibility = View.VISIBLE
             sourcesHdLabel.visibility = View.GONE
-            sourcesSdLabel.visibility = View.GONE
             sourcesGridHd.visibility = View.GONE
-            sourcesGridSd.visibility = View.GONE
             return
         }
-        sourcesLoadingText.visibility = View.GONE
-        val byLatency = compareBy<SearchResult> { probeResults[it.source]?.latencyMs ?: Long.MAX_VALUE }
-        val hdSources = sources.filter { (probeResults[it.source]?.resolutionHeight ?: 0) >= HD_MIN_HEIGHT }.sortedWith(byLatency)
-        val sdSources = sources.filter { (probeResults[it.source]?.resolutionHeight ?: 0) < HD_MIN_HEIGHT }.sortedWith(byLatency)
-        sourcesHdLabel.visibility = if (hdSources.isNotEmpty()) View.VISIBLE else View.GONE
-        sourcesSdLabel.visibility = if (sdSources.isNotEmpty()) View.VISIBLE else View.GONE
-        sourcesGridHd.visibility = if (hdSources.isNotEmpty()) View.VISIBLE else View.GONE
-        sourcesGridSd.visibility = if (sdSources.isNotEmpty()) View.VISIBLE else View.GONE
-        sourcesSdLabel.text = if (hdSources.isEmpty()) "全部片源" else "一般"
-        populateSourceBadges(sourcesGridHd, hdSources)
-        populateSourceBadges(sourcesGridSd, sdSources)
+        val allProbed = sources.all { probeResults.containsKey(it.source) }
+        sourcesLoadingText.visibility = if (allProbed) View.GONE else View.VISIBLE
+        val ordered = if (allProbed) {
+            sources.sortedWith(compareByDescending { probeResults[it.source]?.speedBytesPerSec ?: -1L })
+        } else {
+            sources.toList()
+        }
+        sourcesHdLabel.text = if (allProbed) "片源（按网速排序）" else "片源"
+        sourcesHdLabel.visibility = View.VISIBLE
+        sourcesGridHd.visibility = View.VISIBLE
+        populateSourceBadges(sourcesGridHd, ordered)
+        focusedSource?.let { badges[it]?.requestFocus() }
+    }
+
+    private fun badgeText(result: SearchResult): String {
+        val info = if (probeResults.containsKey(result.source)) formatProbeInfo(probeResults[result.source]) else "测速中…"
+        return "${result.source_name} (${result.episodes.size})\n$info"
     }
 
     private fun populateSourceBadges(grid: FlowLayout, list: List<SearchResult>) {
         list.forEach { result ->
             val badge = layoutInflater.inflate(R.layout.item_source_badge, grid, false) as TextView
-            val probe = probeResults[result.source]
-            val pingLabel = if (probe?.latencyMs != null) " · ${probe.latencyMs}ms" else " · 超时"
-            badge.text = "${result.source_name} (${result.episodes.size})$pingLabel"
+            badge.text = badgeText(result)
             badge.isSelected = result.source == selected?.source
             badge.setOnClickListener { selectSource(result, showEpisodes = true) }
+            badges[result.source] = badge
             grid.addView(badge)
+        }
+    }
+
+    /** Second badge line: "2.3MB/s · 1080p · 1h52m"; unknown parts are omitted, a failed test shows 测速失败. */
+    private fun formatProbeInfo(probe: ProbeResult?): String {
+        if (probe == null || probe.failed) return "测速失败"
+        return listOfNotNull(
+            formatSpeed(probe.speedBytesPerSec!!),
+            probe.resolutionHeight?.let { formatResolution(it) },
+            probe.durationSec?.let { formatDuration(it) }
+        ).joinToString(" · ")
+    }
+
+    private fun formatSpeed(bytesPerSec: Long): String =
+        if (bytesPerSec >= 1_000_000) String.format("%.1fMB/s", bytesPerSec / 1_000_000.0)
+        else "${bytesPerSec / 1000}KB/s"
+
+    private fun formatResolution(height: Int): String = when {
+        height >= 2160 -> "4K"
+        height >= 1440 -> "2K"
+        height >= 1080 -> "1080p"
+        height >= 720 -> "720p"
+        height >= 480 -> "480p"
+        else -> "${height}p"
+    }
+
+    private fun formatDuration(sec: Int): String {
+        val h = sec / 3600
+        val m = (sec % 3600) / 60
+        return when {
+            h > 0 -> "${h}h${m}m"
+            m > 0 -> "${m}分钟"
+            else -> "${sec}秒"
         }
     }
 
@@ -291,7 +350,7 @@ class DetailActivity : FragmentActivity(R.layout.activity_detail) {
     }
 
     companion object {
-        private const val HD_MIN_HEIGHT = 720
+        private const val PROBE_CONCURRENCY = 4
 
         const val EXTRA_TITLE = "title"
         const val EXTRA_SEARCH_TITLE = "search_title"

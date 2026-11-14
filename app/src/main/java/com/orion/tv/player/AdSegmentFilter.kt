@@ -79,7 +79,10 @@ object AdSegmentFilter {
 
         return buildString {
             header.forEach { append(it).append('\n') }
-            keptIndices.forEach { index ->
+            keptIndices.forEachIndexed { n, index ->
+                // Surviving blocks were separated by removed ad blocks, so their timestamps jump:
+                // keep a discontinuity marker between them or the player stalls at the seam.
+                if (n > 0) append(DISCONTINUITY).append('\n')
                 blocks[index].forEach { segment ->
                     append(segment.extinfLine).append('\n')
                     append(segment.uriLine).append('\n')
